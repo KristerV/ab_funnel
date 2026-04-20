@@ -6,9 +6,10 @@ Lightweight A/B testing for Phoenix LiveView apps. Cookie-based variant assignme
 
 ### With Igniter (recommended)
 
+Add to `mix.exs`:
+
 ```elixir
-# Add to deps in mix.exs (path dep for local use, or version for hex)
-{:ab_funnel, path: "~/code/abtest"}
+{:ab_funnel, github: "kristerv/ab_funnel"}
 ```
 
 Then run:
@@ -19,14 +20,14 @@ mix igniter.install ab_funnel
 mix ecto.migrate
 ```
 
-The installer creates a variants module, adds config, generates the migration, and prints remaining steps (adding the plug + mounting the admin page).
+The installer creates a variants module, adds config, generates the migration, and prints remaining steps (adding the plug + mounting the admin page + attaching the LiveView hook).
 
 ### Manual setup
 
 1. Add the dependency:
 
 ```elixir
-{:ab_funnel, path: "~/code/abtest"}
+{:ab_funnel, github: "kristerv/ab_funnel"}
 ```
 
 2. Create a variants module:
@@ -59,7 +60,7 @@ mix ab_funnel.gen.migration
 mix ecto.migrate
 ```
 
-5. Add the plug to your router's `:browser` pipeline:
+5. Add the plug to every browser-facing pipeline that serves pages you want to track:
 
 ```elixir
 pipeline :browser do
@@ -68,12 +69,24 @@ pipeline :browser do
 end
 ```
 
-6. Mount the admin dashboard (behind your own auth):
+If you have multiple browser pipelines (e.g. a separate `:ad_browser`), add the plug to each — otherwise visitors landing on those routes won't be tracked.
+
+6. Attach the LiveView hook so `visitor_id` / `variant` / `source` are available in `socket.assigns`:
+
+```elixir
+live_session :default, on_mount: [AbFunnel.LiveView] do
+  # your live routes
+end
+```
+
+Or per-LiveView: `on_mount AbFunnel.LiveView`.
+
+7. Mount the admin dashboard (behind your own auth). Use a separate scope with no `MyAppWeb` alias so the library module resolves directly:
 
 ```elixir
 scope "/admin" do
   pipe_through [:browser, :require_auth]
-  live "/ab_funnel", AbFunnel.AdminLive
+  live "/ab", AbFunnel.AdminLive
 end
 ```
 
@@ -81,28 +94,26 @@ end
 
 ### Tracking events
 
-In any LiveView, read the session values and track events:
+Once `on_mount AbFunnel.LiveView` is attached, tracking is a one-liner:
 
 ```elixir
-def mount(_params, session, socket) do
-  visitor_id = session["ab_funnel_visitor_id"]
-  variant = session["ab_funnel_variant"]
-
-  AbFunnel.track(visitor_id, "landed", variant)
-
-  {:ok, assign(socket, visitor_id: visitor_id, variant: variant)}
+def mount(_params, _session, socket) do
+  AbFunnel.track(socket, "landed")
+  {:ok, socket}
 end
 
 def handle_event("signup", _params, socket) do
-  AbFunnel.track(socket.assigns.visitor_id, "signed_up", socket.assigns.variant)
+  AbFunnel.track(socket, "signed_up", %{plan: "pro"})
   {:noreply, socket}
 end
 ```
 
 ### Variant-specific UI
 
+`@ab_funnel_variant` is assigned by the `on_mount` hook:
+
 ```heex
-<%= if @variant == "treatment" do %>
+<%= if @ab_funnel_variant == "treatment" do %>
   <.new_signup_form />
 <% else %>
   <.classic_signup_form />
@@ -136,3 +147,9 @@ The visitor plug automatically captures `utm_source` and `utm_campaign` query pa
 Mount `AbFunnel.AdminLive` behind auth. It shows conversion funnels grouped by variant and source, with step-by-step and total conversion percentages.
 
 Event labels are auto-humanized from event names (`"started_chat"` → `"Started chat"`).
+
+The dashboard ships its own styles (no Tailwind required) and follows `prefers-color-scheme` for light/dark mode.
+
+## License
+
+MIT

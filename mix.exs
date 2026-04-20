@@ -32,7 +32,7 @@ defmodule AbFunnel.MixProject do
       {:ecto_sql, "~> 3.12"},
       {:jason, "~> 1.4"},
       {:plug, "~> 1.16"},
-      {:igniter, "~> 0.5"},
+      {:igniter, "~> 0.5", optional: true},
       {:postgrex, ">= 0.0.0", only: :test}
     ]
   end
@@ -46,7 +46,7 @@ defmodule AbFunnel.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{}
+      links: %{"GitHub" => "https://github.com/kristerv/ab_funnel"}
     ]
   end
 end

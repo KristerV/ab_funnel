@@ -55,10 +55,17 @@ defmodule Mix.Tasks.AbFunnel.Install do
     3. Mount the admin dashboard in your router:
        live "/admin/ab_funnel", AbFunnel.AdminLive
 
-    4. Track events in your LiveViews:
-       visitor_id = session["ab_funnel_visitor_id"]
-       variant = session["ab_funnel_variant"]
-       AbFunnel.track(visitor_id, "landed", variant)
+    4. Attach the LiveView hook — either globally in your router:
+         live_session :default, on_mount: [AbFunnel.LiveView] do
+           # your live routes
+         end
+
+       Or per-LiveView:
+         on_mount AbFunnel.LiveView
+
+    5. Track events in your LiveViews:
+       AbFunnel.track(socket, "landed")
+       AbFunnel.track(socket, "signup", %{plan: "pro"})
     """)
   end
 end

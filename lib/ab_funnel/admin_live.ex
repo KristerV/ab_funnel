@@ -64,22 +64,54 @@ defmodule AbFunnel.AdminLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="px-4 py-8 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-4xl">
-        <h1 class="text-2xl font-bold mb-2">A/B Funnel</h1>
-        <p class="text-sm text-gray-500 mb-8">Visitor conversion by variant</p>
+    <style>
+      .abf { color-scheme: light dark; padding: 2rem 1rem; font-family: system-ui, -apple-system, sans-serif;
+             color: #111827; background: #ffffff; min-height: 100vh; }
+      .abf-wrap { max-width: 56rem; margin: 0 auto; }
+      .abf h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 0.5rem; }
+      .abf h2 { font-size: 1.25rem; font-weight: 700; margin: 0 0 1rem; }
+      .abf h3 { font-size: 0.875rem; font-weight: 500; margin: 0; color: #6b7280; }
+      .abf-sub { font-size: 0.875rem; color: #6b7280; margin: 0 0 2rem; }
+      .abf-variant { margin-top: 2.5rem; }
+      .abf-source { margin: 0 0 1.5rem 0.5rem; }
+      .abf-source-head { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+      .abf-badge { display: inline-flex; align-items: center; border-radius: 9999px;
+                   background: #dbeafe; color: #1e40af; padding: 0.125rem 0.5rem;
+                   font-size: 0.75rem; font-weight: 500; }
+      .abf-steps { display: flex; align-items: center; gap: 0.5rem; overflow-x: auto; }
+      .abf-step { display: flex; align-items: center; gap: 0.5rem; }
+      .abf-card { border: 1px solid #e5e7eb; background: #ffffff; border-radius: 0.5rem;
+                  box-shadow: 0 1px 2px rgba(0,0,0,0.05); padding: 1rem; min-width: 140px; text-align: center; }
+      .abf-card-label { font-size: 0.875rem; color: #6b7280; margin-bottom: 0.25rem; }
+      .abf-card-count { font-size: 1.5rem; font-weight: 700; }
+      .abf-card-rate { font-size: 0.75rem; color: #059669; margin-top: 0.25rem; }
+      .abf-arrow { color: #d1d5db; font-size: 1.25rem; }
+      .abf-empty { margin-top: 2rem; text-align: center; color: #6b7280; }
+      @media (prefers-color-scheme: dark) {
+        .abf { color: #f3f4f6; background: #111827; }
+        .abf h3, .abf-sub, .abf-card-label, .abf-empty { color: #9ca3af; }
+        .abf-badge { background: rgba(30, 64, 175, 0.4); color: #bfdbfe; }
+        .abf-card { border-color: #374151; background: #1f2937; }
+        .abf-card-rate { color: #34d399; }
+        .abf-arrow { color: #4b5563; }
+      }
+    </style>
+    <div class="abf">
+      <div class="abf-wrap">
+        <h1>A/B Funnel</h1>
+        <p class="abf-sub">Visitor conversion by variant</p>
 
-        <div :for={{variant, sources} <- @counts} class="mt-10">
-          <h2 class="text-xl font-bold mb-4">{variant_name(variant)}</h2>
+        <div :for={{variant, sources} <- @counts} class="abf-variant">
+          <h2>{variant_name(variant)}</h2>
 
-          <div :for={{source, steps} <- sources} class="mb-6 ml-2">
-            <div class="flex items-center gap-3 mb-3">
-              <h3 class="text-sm font-medium text-gray-500">{source}</h3>
-              <span :if={length(steps) >= 2} class="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+          <div :for={{source, steps} <- sources} class="abf-source">
+            <div class="abf-source-head">
+              <h3>{source}</h3>
+              <span :if={length(steps) >= 2} class="abf-badge">
                 {total_conversion(steps)}% total
               </span>
             </div>
-            <div class="flex items-center gap-2 overflow-x-auto">
+            <div class="abf-steps">
               <.step_card
                 :for={{{step, count}, i} <- Enum.with_index(steps)}
                 step={step}
@@ -91,7 +123,7 @@ defmodule AbFunnel.AdminLive do
           </div>
         </div>
 
-        <div :if={@counts == []} class="mt-8 text-center text-gray-500">
+        <div :if={@counts == []} class="abf-empty">
           No funnel events recorded yet.
         </div>
       </div>
@@ -110,13 +142,13 @@ defmodule AbFunnel.AdminLive do
     assigns = assign(assigns, :rate, rate)
 
     ~H"""
-    <div class="flex items-center gap-2">
-      <div class="rounded-lg border bg-white shadow-sm p-4 min-w-[140px] text-center">
-        <div class="text-sm text-gray-500 mb-1">{label(@step)}</div>
-        <div class="text-2xl font-bold">{@count}</div>
-        <div :if={@rate} class="text-xs text-green-600 mt-1">{@rate}%</div>
+    <div class="abf-step">
+      <div class="abf-card">
+        <div class="abf-card-label">{label(@step)}</div>
+        <div class="abf-card-count">{@count}</div>
+        <div :if={@rate} class="abf-card-rate">{@rate}%</div>
       </div>
-      <div :if={!@last} class="text-gray-300 text-xl">&rarr;</div>
+      <div :if={!@last} class="abf-arrow">&rarr;</div>
     </div>
     """
   end
