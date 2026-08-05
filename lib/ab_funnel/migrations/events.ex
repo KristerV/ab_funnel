@@ -41,7 +41,12 @@ defmodule AbFunnel.Migrations.Events do
   Nothing queries by time yet — the report reads everything. It is here because the day
   that changes, the index is a migration against a table that has grown for months, and
   adding it now costs nothing.
+
+  Idempotent because a host app has both paths in its migration history: an install that
+  predates this index has a migration calling it directly, while `up/0` above now creates
+  it with the table. Replay that history from an empty database — a fresh deploy, a CI
+  run — and both fire. The second one has to be a no-op, not a duplicate_table error.
   """
-  def create_time_index, do: create(index(:ab_funnel_events, [:inserted_at]))
+  def create_time_index, do: create_if_not_exists(index(:ab_funnel_events, [:inserted_at]))
   def drop_time_index, do: drop_if_exists(index(:ab_funnel_events, [:inserted_at]))
 end
