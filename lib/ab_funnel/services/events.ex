@@ -1,7 +1,7 @@
-defmodule AbFunnel.Events do
+defmodule AbFunnel.Services.Events do
   import Ecto.Query
 
-  alias AbFunnel.Event
+  alias AbFunnel.Resources.Event
 
   def track(visitor_id, event, variant, metadata \\ %{}) do
     %{visitor_id: visitor_id, event: event, variant: variant, metadata: metadata}

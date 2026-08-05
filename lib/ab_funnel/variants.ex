@@ -26,7 +26,29 @@ defmodule AbFunnel.Variants do
         ArgumentError -> key
       end
 
-      def random_key, do: Enum.random(keys())
+      def random_key do
+        case keys() do
+          [] ->
+            raise """
+            #{inspect(__MODULE__)} has no active variants, so there is nothing to assign \
+            a new visitor to. At least one variant needs `active: true`.\
+            """
+
+          keys ->
+            Enum.random(keys)
+        end
+      end
+
+      @doc """
+      Whether `key` names a variant this module declares, active or not.
+
+      Inactive counts as known: a visitor assigned before a variant was retired keeps it.
+      """
+      def known?(key) when is_binary(key) do
+        Enum.any?(variants(), &(Atom.to_string(&1.key) == key))
+      end
+
+      def known?(key) when is_atom(key), do: Enum.any?(variants(), &(&1.key == key))
     end
   end
 end

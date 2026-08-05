@@ -63,8 +63,11 @@ defmodule AbFunnel.Plug.VisitorTest do
 
     visitor_id = conn.resp_cookies["ab_funnel_visitor_id"].value
 
-    events = AbFunnel.Events.all()
-    source_events = Enum.filter(events, &(&1.visitor_id == visitor_id and &1.event == "source:twitter"))
+    events = AbFunnel.Services.Events.all()
+
+    source_events =
+      Enum.filter(events, &(&1.visitor_id == visitor_id and &1.event == "source:twitter"))
+
     assert length(source_events) >= 1
   end
 
@@ -75,8 +78,14 @@ defmodule AbFunnel.Plug.VisitorTest do
 
     visitor_id = conn.resp_cookies["ab_funnel_visitor_id"].value
 
-    events = AbFunnel.Events.all()
-    source_events = Enum.filter(events, &(&1.visitor_id == visitor_id and String.starts_with?(&1.event, "source:")))
+    events = AbFunnel.Services.Events.all()
+
+    source_events =
+      Enum.filter(
+        events,
+        &(&1.visitor_id == visitor_id and String.starts_with?(&1.event, "source:"))
+      )
+
     assert source_events == []
   end
 end

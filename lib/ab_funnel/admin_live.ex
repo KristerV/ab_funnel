@@ -3,62 +3,7 @@ defmodule AbFunnel.AdminLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    events = AbFunnel.Events.all()
-    counts = build_counts(events)
-    {:ok, assign(socket, counts: counts)}
-  end
-
-  defp build_counts(events) do
-    step_order = derive_step_order(events)
-    source_lookup = build_source_lookup(events)
-
-    funnel_events = Enum.reject(events, &String.starts_with?(&1.event, "source:"))
-
-    funnel_events
-    |> Enum.group_by(& &1.variant)
-    |> Enum.map(fn {variant, variant_events} ->
-      sources =
-        variant_events
-        |> Enum.group_by(&Map.get(source_lookup, &1.visitor_id, "direct"))
-        |> Enum.map(fn {source, source_events} ->
-          steps =
-            source_events
-            |> Enum.group_by(& &1.event)
-            |> Enum.map(fn {event, evts} ->
-              {event, evts |> Enum.map(& &1.visitor_id) |> Enum.uniq() |> length()}
-            end)
-            |> Enum.sort_by(fn {event, _} -> Map.get(step_order, event, 999) end)
-
-          {source, steps}
-        end)
-        |> Enum.sort_by(fn {source, _} -> source end)
-
-      {variant, sources}
-    end)
-    |> Enum.sort_by(fn {variant, _} -> variant end)
-  end
-
-  defp build_source_lookup(events) do
-    events
-    |> Enum.filter(&String.starts_with?(&1.event, "source:"))
-    |> Map.new(fn e -> {e.visitor_id, String.replace_leading(e.event, "source:", "")} end)
-  end
-
-  defp derive_step_order(events) do
-    events
-    |> Enum.reject(&String.starts_with?(&1.event, "source:"))
-    |> Enum.group_by(& &1.visitor_id)
-    |> Enum.flat_map(fn {_vid, visitor_events} ->
-      visitor_events
-      |> Enum.sort_by(& &1.inserted_at)
-      |> Enum.with_index()
-      |> Enum.map(fn {e, i} -> {e.event, i} end)
-    end)
-    |> Enum.group_by(fn {event, _} -> event end, fn {_, i} -> i end)
-    |> Enum.map(fn {event, positions} ->
-      {event, Enum.sum(positions) / length(positions)}
-    end)
-    |> Map.new()
+    {:ok, assign(socket, counts: AbFunnel.Services.Report.funnel())}
   end
 
   @impl true

@@ -1,30 +1,34 @@
 defmodule AbFunnel.Migrations do
-  use Ecto.Migration
+  @moduledoc """
+  What a host app calls from its own migration. One table per module under
+  `AbFunnel.Migrations.*`; this is the entry point that names them together.
+  """
 
+  alias AbFunnel.Migrations.Events
+  alias AbFunnel.Migrations.Identities
+
+  @doc """
+  Everything AbFunnel needs, for a fresh install.
+
+  An app that already ran an earlier version has the events table and needs only
+  `create_identities/0` in a new migration of its own.
+  """
   def up do
-    create table(:ab_funnel_events, primary_key: false) do
-      add :id, :uuid, null: false, default: fragment("gen_random_uuid()"), primary_key: true
-      add :visitor_id, :text, null: false
-      add :event, :text, null: false
-      add :variant, :text, null: false
-      add :metadata, :map, null: false, default: fragment("'{}'::jsonb")
-
-      add :inserted_at, :utc_datetime_usec,
-        null: false,
-        default: fragment("(now() AT TIME ZONE 'utc')")
-
-      add :updated_at, :utc_datetime_usec,
-        null: false,
-        default: fragment("(now() AT TIME ZONE 'utc')")
-    end
-
-    create index(:ab_funnel_events, [:visitor_id])
-    create index(:ab_funnel_events, [:variant, :event])
+    Events.up()
+    Identities.up()
   end
 
   def down do
-    drop_if_exists index(:ab_funnel_events, [:variant, :event])
-    drop_if_exists index(:ab_funnel_events, [:visitor_id])
-    drop table(:ab_funnel_events)
+    Identities.down()
+    Events.down()
   end
+
+  def create_events, do: Events.up()
+  def drop_events, do: Events.down()
+
+  def create_identities, do: Identities.up()
+  def drop_identities, do: Identities.down()
+
+  def create_event_time_index, do: Events.create_time_index()
+  def drop_event_time_index, do: Events.drop_time_index()
 end
