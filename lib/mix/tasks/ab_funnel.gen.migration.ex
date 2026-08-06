@@ -2,6 +2,7 @@ defmodule Mix.Tasks.AbFunnel.Gen.Migration do
   use Mix.Task
 
   import Mix.Ecto
+  import Mix.EctoSQL
   import Mix.Generator
 
   @shortdoc "Generates the AbFunnel database migration"
@@ -24,7 +25,18 @@ defmodule Mix.Tasks.AbFunnel.Gen.Migration do
     args
     |> parse_repo()
     |> Enum.each(fn repo ->
-      path = Ecto.Migrator.migrations_path(repo)
+      # `parse_repo/1` reads a module *name* out of config and nothing more, so without
+      # this the first call into the repo raises `Repo.config/0 is undefined` on any app
+      # whose code has not already been loaded — which is every app running this task
+      # straight from a shell, the way the README says to.
+      ensure_repo(repo, args)
+
+      # `source_repo_priv/1`, not `Ecto.Migrator.migrations_path/1`: the latter resolves
+      # through `Application.app_dir/2` into `_build`. Mix symlinks `_build/…/priv` back
+      # to the source tree for the project being built, so it happens to land in the right
+      # place there and nowhere else — a repo that lives in a dependency would have its
+      # migration written into a build artifact and silently lost on `mix clean`.
+      path = Path.join(source_repo_priv(repo), "migrations")
       File.mkdir_p!(path)
 
       timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")
