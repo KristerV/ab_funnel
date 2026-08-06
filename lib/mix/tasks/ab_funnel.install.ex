@@ -7,7 +7,7 @@ if Code.ensure_loaded?(Igniter) do
     def igniter(igniter) do
       app_name = Igniter.Project.Application.app_name(igniter)
       app_module = app_name |> Atom.to_string() |> Macro.camelize() |> String.to_atom()
-      variants_module = Module.concat(app_module, ABVariants)
+      experiments_module = Module.concat(app_module, ABTests)
       repo_module = Module.concat(app_module, Repo)
 
       igniter
@@ -20,19 +20,28 @@ if Code.ensure_loaded?(Igniter) do
       |> Igniter.Project.Config.configure(
         "config.exs",
         :ab_funnel,
-        [:variants],
-        {:code, Sourceror.parse_string!("#{inspect(variants_module)}")}
+        [:experiments],
+        {:code, Sourceror.parse_string!("#{inspect(experiments_module)}")}
       )
       |> Igniter.create_new_file(
-        "lib/#{app_name}/ab_variants.ex",
+        "lib/#{app_name}/ab_tests.ex",
         """
-        defmodule #{inspect(variants_module)} do
-          use AbFunnel.Variants
+        defmodule #{inspect(experiments_module)} do
+          use AbFunnel.Experiments
 
-          def variants do
+          def experiments do
             [
-              %{key: :control, label: "Control", active: true},
-              %{key: :treatment, label: "Treatment", active: true}
+              %{
+                key: :onboarding,
+                variants: [:control, :treatment],
+                # The funnel, in order. The first step is the entry event: only people who
+                # fire it are in the experiment at all. The last is the goal, which is what
+                # significance is measured on.
+                #
+                # Declaring it is optional — leave `steps` out and the order is inferred
+                # from the data, which works for a single linear journey and not much else.
+                steps: ~w(signed_up completed_profile activated)
+              }
             ]
           end
         end
@@ -50,23 +59,28 @@ if Code.ensure_loaded?(Igniter) do
       1. Run migrations:
          mix ecto.migrate
 
-      2. Add the plug to your router's :browser pipeline:
-         plug AbFunnel.Plug.Visitor
+      2. Add the plug to your router's :browser pipeline, AFTER whatever loads the
+         current user (that is what lets it join a person's devices automatically):
+           plug AbFunnel.Plug.Visitor
 
-      3. Mount the admin dashboard in your router:
-         live "/admin/ab_funnel", AbFunnel.AdminLive
-
-      4. Attach the LiveView hook — either globally in your router:
-           live_session :default, on_mount: [AbFunnel.LiveView] do
+      3. Attach the LiveView hook, again after whatever assigns the current user:
+           live_session :default,
+             on_mount: [{MyAppWeb.UserAuth, :mount_current_user}, AbFunnel.LiveView] do
              # your live routes
            end
 
          Or per-LiveView:
            on_mount AbFunnel.LiveView
 
-      5. Track events in your LiveViews:
-         AbFunnel.track(socket, "landed")
-         AbFunnel.track(socket, "signup", %{plan: "pro"})
+      4. Mount the dashboard behind your own auth:
+           live "/admin/ab_funnel", AbFunnel.AdminLive
+
+      5. Track the steps you declared in #{inspect(experiments_module)}:
+           AbFunnel.track(socket, "signed_up")
+           AbFunnel.track(conn, "activated", %{plan: "pro"})
+
+      6. Branch on the variant:
+           if AbFunnel.variant(socket, :onboarding) == "treatment" do
       """)
     end
   end

@@ -1,7 +1,7 @@
 defmodule AbFunnel.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.3.0"
 
   def project do
     [
@@ -12,7 +12,7 @@ defmodule AbFunnel.MixProject do
       deps: deps(),
       elixirc_paths: elixirc_paths(Mix.env()),
       aliases: aliases(),
-      description: "Lightweight A/B testing for Phoenix LiveView apps",
+      description: "A/B experiments for Phoenix apps, with funnels and significance",
       package: package()
     ]
   end

@@ -1,12 +1,23 @@
 defmodule AbFunnel.Plug.Visitor do
   @moduledoc """
-  Assigns every browser a visitor id and a variant, both sticky for a year, and records
-  where they came from.
+  Assigns every browser a visitor id and a bucket in each running experiment, both sticky
+  for a year, and records where they came from.
 
   Also binds the browser to whoever is signed in, so apps never have to remember to. Put
   this *after* whatever loads the current user, or that binding has nothing to work with.
+
+  What ends up in `assigns` (and the session, for LiveView to pick up):
+
+    * `:ab_funnel_visitor_id` — `nil` for a bot, which is what makes `track/2` a no-op.
+    * `:ab_funnel_assignments` — `%{"deck" => "features"}`, every running experiment.
+    * `:ab_funnel_variant` — the first experiment's, for single-experiment apps and for
+      templates written before experiments existed.
+    * `:ab_funnel_source`, `:ab_funnel_bot`.
   """
   import Plug.Conn
+
+  alias AbFunnel.Assignment
+  alias AbFunnel.Experiments
 
   @max_age 365 * 24 * 60 * 60
 
@@ -20,41 +31,126 @@ defmodule AbFunnel.Plug.Visitor do
   def call(conn, _opts) do
     conn = conn |> fetch_cookies() |> fetch_query_params()
 
+    if AbFunnel.Bot.bot?(conn), do: crawler(conn), else: visitor(conn)
+  end
+
+  # A crawler still has to render something, so it gets the control arm of every
+  # experiment — but no cookies, no visitor id, and therefore no events. Everything about
+  # it is decided per request and forgotten.
+  defp crawler(conn) do
+    assignments =
+      Map.new(Experiments.active(), fn experiment ->
+        control = AbFunnel.Experiment.control(experiment)
+        {experiment.key, control && control.key}
+      end)
+
+    conn
+    |> assign(:ab_funnel_bot, true)
+    |> assign(:ab_funnel_visitor_id, nil)
+    |> assign(:ab_funnel_assignments, assignments)
+    |> assign(:ab_funnel_variant, primary_variant(assignments))
+    |> assign(:ab_funnel_source, "direct")
+  end
+
+  defp visitor(conn) do
     {conn, visitor_id, _} =
-      ensure_cookie(conn, "ab_funnel_visitor_id", fn -> Ecto.UUID.generate() end)
+      ensure_cookie(conn, "ab_funnel_visitor_id", fn _conn -> Ecto.UUID.generate() end)
 
-    variants_mod = AbFunnel.variants_module()
-
-    {conn, variant, _} =
-      ensure_cookie(
-        conn,
-        "ab_funnel_variant",
-        fn -> Atom.to_string(variants_mod.random_key()) end,
-        # A cookie is whatever the client says it is. An unrecognised variant would let a
-        # visitor pick their own bucket and would show up as a phantom column in the
-        # report, so anything we do not recognise is replaced with a fresh assignment.
-        &variants_mod.known?/1
-      )
-
-    {conn, source, source_state} =
-      ensure_cookie(conn, "ab_funnel_source", fn -> derive_source(conn) end)
+    {conn, qa} = qa_override(conn)
+    {conn, assignments} = assignments(conn, visitor_id, qa)
+    {conn, source, source_state} = ensure_cookie(conn, "ab_funnel_source", &derive_source(&1))
 
     # Only on the request that established it. Firing whenever the cookie merely *exists*
     # writes a duplicate row on every subsequent page view, forever.
     if source_state == :new and source != "direct" do
-      AbFunnel.track(visitor_id, "source:#{source}", variant)
+      AbFunnel.track(visitor_id, "source:#{source}", assignments)
     end
 
     conn
     |> put_session("ab_funnel_visitor_id", visitor_id)
-    |> put_session("ab_funnel_variant", variant)
+    |> put_session("ab_funnel_assignments", assignments)
     |> put_session("ab_funnel_source", source)
     # Assigned as well as put in the session, so `AbFunnel.track(conn, ...)` reads them
     # from the same place it does on a socket.
+    |> assign(:ab_funnel_bot, false)
     |> assign(:ab_funnel_visitor_id, visitor_id)
-    |> assign(:ab_funnel_variant, variant)
+    |> assign(:ab_funnel_assignments, assignments)
+    |> assign(:ab_funnel_variant, primary_variant(assignments))
     |> assign(:ab_funnel_source, source)
     |> maybe_identify(visitor_id)
+  end
+
+  # One cookie for every experiment rather than one each: adding a test should cost bytes,
+  # not another `Set-Cookie` on every response. Rewritten only when something new was
+  # actually assigned.
+  defp assignments(conn, visitor_id, qa) do
+    stored =
+      conn.cookies["ab_funnel_assignments"]
+      |> Assignment.decode()
+      |> seed_from_legacy_cookie(conn)
+
+    {assignments, state} = Assignment.resolve(visitor_id, stored)
+
+    conn =
+      if state == :changed do
+        put_cookie(conn, "ab_funnel_assignments", Assignment.encode(assignments))
+      else
+        conn
+      end
+
+    {conn, merge_qa(assignments, qa)}
+  end
+
+  # An install that predates experiments has a single `ab_funnel_variant` cookie. Reading
+  # it once, into whichever experiment declares that variant, is what stops everyone
+  # already mid-test from being rebucketed the moment the library is upgraded.
+  defp seed_from_legacy_cookie(stored, conn) do
+    with variant when is_binary(variant) <- conn.cookies["ab_funnel_variant"],
+         experiment when not is_nil(experiment) <- Experiments.owning(variant) do
+      Map.put_new(stored, experiment.key, variant)
+    else
+      _ -> stored
+    end
+  end
+
+  # `?ab_funnel=deck:features` forces a bucket so a developer can look at the other arm;
+  # `?ab_funnel=off` clears it. Both are validated against what the app declares, so this
+  # is not a way to write arbitrary variants into the table.
+  #
+  # Anyone using it is marked, and the report drops them. Without that this would be a hole
+  # straight through the experiment: the person most likely to force a bucket is the one
+  # who then reads the numbers.
+  defp qa_override(conn) do
+    stored = conn.cookies["ab_funnel_qa"] |> Assignment.decode() |> Assignment.validate()
+
+    case conn.query_params["ab_funnel"] do
+      nil ->
+        {conn, stored}
+
+      "off" ->
+        {put_resp_cookie(conn, "ab_funnel_qa", "", max_age: 0, same_site: "Lax"), %{}}
+
+      requested ->
+        case requested |> Assignment.decode() |> Assignment.validate() do
+          empty when empty == %{} -> {conn, stored}
+          forced -> {put_cookie(conn, "ab_funnel_qa", Assignment.encode(forced)), forced}
+        end
+    end
+  end
+
+  defp merge_qa(assignments, qa) when qa == %{}, do: assignments
+
+  defp merge_qa(assignments, qa) do
+    assignments |> Map.merge(qa) |> Map.put(Assignment.qa_key(), "1")
+  end
+
+  # Templates written against `@ab_funnel_variant` predate experiments and belong to apps
+  # running exactly one, so the first declared experiment is the only sensible answer.
+  defp primary_variant(assignments) do
+    case Experiments.active() do
+      [first | _] -> Map.get(assignments, first.key)
+      [] -> nil
+    end
   end
 
   defp derive_source(conn) do
@@ -102,19 +198,18 @@ defmodule AbFunnel.Plug.Visitor do
 
   # Returns `{conn, value, :new | :existing}` — callers need to know whether this request
   # is the one that established the value.
-  defp ensure_cookie(conn, name, generator, valid? \\ fn _ -> true end) do
+  defp ensure_cookie(conn, name, generator) do
     case conn.cookies[name] do
-      value when is_binary(value) ->
-        if valid?.(value), do: {conn, value, :existing}, else: put_new(conn, name, generator)
+      value when is_binary(value) and value != "" ->
+        {conn, value, :existing}
 
       _ ->
-        put_new(conn, name, generator)
+        value = generator.(conn)
+        {put_cookie(conn, name, value), value, :new}
     end
   end
 
-  defp put_new(conn, name, generator) do
-    value = generator.()
-    conn = put_resp_cookie(conn, name, value, max_age: @max_age, same_site: "Lax")
-    {conn, value, :new}
+  defp put_cookie(conn, name, value) do
+    put_resp_cookie(conn, name, value, max_age: @max_age, same_site: "Lax")
   end
 end

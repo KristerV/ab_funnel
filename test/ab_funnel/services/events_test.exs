@@ -1,36 +1,50 @@
 defmodule AbFunnel.Services.EventsTest do
   use AbFunnel.DataCase, async: true
 
-  test "track/3 inserts an event" do
-    {:ok, event} = AbFunnel.Services.Events.track("visitor-1", "landed", "control")
+  alias AbFunnel.Services.Events
+
+  test "an event carries every bucket the visitor is in" do
+    {:ok, event} =
+      Events.track("visitor-1", "landed", %{"deck" => "features", "pricing" => "annual"})
 
     assert event.visitor_id == "visitor-1"
     assert event.event == "landed"
-    assert event.variant == "control"
+    assert event.assignments == %{"deck" => "features", "pricing" => "annual"}
     assert event.metadata == %{}
   end
 
-  test "track/4 stores metadata" do
-    {:ok, event} =
-      AbFunnel.Services.Events.track("visitor-1", "landed", "control", %{"page" => "/home"})
+  test "a bare variant is attributed to the experiment that declares it" do
+    # The shape single-experiment callers used before experiments existed.
+    {:ok, event} = Events.track("visitor-1", "landed", "solving_emails")
+
+    assert event.assignments == %{"deck" => "solving_emails"}
+  end
+
+  test "a variant nobody declares lands in no experiment rather than a phantom one" do
+    {:ok, event} = Events.track("visitor-1", "landed", "who-knows")
+
+    assert event.assignments == %{}
+  end
+
+  test "metadata is stored alongside" do
+    {:ok, event} = Events.track("visitor-1", "landed", %{}, %{"page" => "/home"})
 
     assert event.metadata == %{"page" => "/home"}
   end
 
-  test "duplicate events are stored (no dedup)" do
-    {:ok, _} = AbFunnel.Services.Events.track("visitor-1", "landed", "control")
-    {:ok, _} = AbFunnel.Services.Events.track("visitor-1", "landed", "control")
+  test "the log is append-only — nothing is deduplicated on the way in" do
+    # Dedup happens at read time, per person per step. Doing it on write would lose the
+    # count of how often someone repeated a step, which is a real question to ask later.
+    {:ok, _} = Events.track("visitor-1", "landed", %{})
+    {:ok, _} = Events.track("visitor-1", "landed", %{})
 
-    events = AbFunnel.Services.Events.all()
-    visitor_landed = Enum.filter(events, &(&1.visitor_id == "visitor-1" and &1.event == "landed"))
-    assert length(visitor_landed) == 2
+    assert length(Events.all()) == 2
   end
 
-  test "all/0 returns all events" do
-    {:ok, _} = AbFunnel.Services.Events.track("v1", "landed", "control")
-    {:ok, _} = AbFunnel.Services.Events.track("v2", "clicked", "treatment")
+  test "prune/1 bounds the table for an app that wants it bounded" do
+    record("old", "landed", 0)
 
-    events = AbFunnel.Services.Events.all()
-    assert length(events) >= 2
+    assert {1, _} = Events.prune(1)
+    assert Events.all() == []
   end
 end

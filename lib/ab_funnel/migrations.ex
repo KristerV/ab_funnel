@@ -31,4 +31,7 @@ defmodule AbFunnel.Migrations do
 
   def create_event_time_index, do: Events.create_time_index()
   def drop_event_time_index, do: Events.drop_time_index()
+
+  def add_event_assignments, do: Events.add_assignments()
+  def drop_event_assignments, do: Events.drop_assignments()
 end

@@ -1,7 +1,8 @@
 defmodule AbFunnel.LiveView do
   @moduledoc """
-  Lifts the visitor, variant and source out of the session into `socket.assigns`, so
-  `AbFunnel.track(socket, ...)` works and templates can branch on `@ab_funnel_variant`.
+  Lifts the visitor, their assignments and the source out of the session into
+  `socket.assigns`, so `AbFunnel.track(socket, ...)` works and templates can branch on
+  `@ab_funnel_variant` or `AbFunnel.variant(@socket, :pricing)`.
 
   List it after whatever assigns the current user, so it can bind the browser to them:
 
@@ -10,16 +11,28 @@ defmodule AbFunnel.LiveView do
   """
   import Phoenix.Component, only: [assign: 3]
 
+  alias AbFunnel.Experiments
+
   def on_mount(:default, _params, session, socket) do
+    assignments = session["ab_funnel_assignments"] || %{}
+
     socket =
       socket
       |> assign(:ab_funnel_visitor_id, session["ab_funnel_visitor_id"])
-      |> assign(:ab_funnel_variant, session["ab_funnel_variant"])
+      |> assign(:ab_funnel_assignments, assignments)
+      |> assign(:ab_funnel_variant, primary_variant(assignments))
       |> assign(:ab_funnel_source, session["ab_funnel_source"])
 
     maybe_identify(socket, session)
 
     {:cont, socket}
+  end
+
+  defp primary_variant(assignments) do
+    case Experiments.active() do
+      [first | _] -> Map.get(assignments, first.key)
+      [] -> nil
+    end
   end
 
   # The plug has usually bound this browser already and left a marker in the session, so

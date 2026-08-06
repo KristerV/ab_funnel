@@ -1,17 +1,23 @@
 defmodule AbFunnel do
   @moduledoc """
-  Funnel tracking and A/B variant assignment for Phoenix apps.
+  Funnel tracking and A/B experiments for Phoenix apps.
 
   Everything here takes either a `Plug.Conn` or a `Phoenix.LiveView.Socket`, so the same
   call works in a controller and in a LiveView.
 
-      AbFunnel.track(socket, "landing")
+      AbFunnel.track(socket, "deck_started")
       AbFunnel.track(conn, "checked_out", %{plan: "pro"})
+
+      if AbFunnel.variant(socket, :pricing) == "annual" do
+
+  Experiments are declared in one module (`AbFunnel.Experiments`) and run concurrently: a
+  visitor is bucketed once per experiment, so a second test costs a second bucket rather
+  than the cross product of both tests' arms.
 
   Identity is handled for you wherever it can be. Once someone is signed in, the plug and
   the `on_mount` hook bind their browser to them automatically — you only call
-  `identify_by_email/2` for the one case nothing can infer, which is someone who has
-  handed over an email but does not have an account yet.
+  `identify_by_email/2` for the one case nothing can infer, which is someone who has handed
+  over an email but does not have an account yet.
   """
 
   alias AbFunnel.Context
@@ -19,29 +25,55 @@ defmodule AbFunnel do
   alias AbFunnel.Services.Identities
 
   @doc """
-  Record an event against the current visitor.
+  Record an event against the current visitor, stamped with every bucket they are in.
 
-  Does nothing when there is no visitor — an endpoint outside the browser pipeline, say —
-  rather than raising in the middle of whatever the caller was actually doing.
+  Does nothing when there is no visitor — an endpoint outside the browser pipeline, a
+  crawler — rather than raising in the middle of whatever the caller was actually doing.
   """
   def track(conn_or_socket, event, metadata \\ %{})
 
-  def track(%{assigns: _} = conn_or_socket, event, metadata)
+  def track(%Phoenix.LiveView.Socket{} = socket, event, metadata)
       when is_binary(event) and is_map(metadata) do
-    case Context.visitor(conn_or_socket) do
-      {nil, _} -> {:ok, :no_visitor}
-      {_, nil} -> {:ok, :no_visitor}
-      {visitor_id, variant} -> Events.track(visitor_id, event, variant, metadata)
+    # A LiveView mounts twice: once to render the page over HTTP, then again over the
+    # socket. Tracking on both writes every event twice. Person counts survive that, but
+    # nothing else does — and the second mount is the one where a real browser is
+    # definitely present, so it is the one to keep.
+    if Phoenix.LiveView.connected?(socket) do
+      do_track(socket, event, metadata)
+    else
+      {:ok, :not_connected}
     end
   end
 
-  def track(visitor_id, event, variant) when is_binary(visitor_id) and is_binary(variant) do
-    Events.track(visitor_id, event, variant, %{})
+  def track(%{assigns: _} = conn_or_socket, event, metadata)
+      when is_binary(event) and is_map(metadata) do
+    do_track(conn_or_socket, event, metadata)
   end
 
-  def track(visitor_id, event, variant, metadata) when is_binary(visitor_id) do
-    Events.track(visitor_id, event, variant, metadata)
+  def track(visitor_id, event, assignments) when is_binary(visitor_id) do
+    Events.track(visitor_id, event, assignments, %{})
   end
+
+  def track(visitor_id, event, assignments, metadata) when is_binary(visitor_id) do
+    Events.track(visitor_id, event, assignments, metadata)
+  end
+
+  defp do_track(conn_or_socket, event, metadata) do
+    case Context.visitor(conn_or_socket) do
+      {nil, _} -> {:ok, :no_visitor}
+      {visitor_id, assignments} -> Events.track(visitor_id, event, assignments, metadata)
+    end
+  end
+
+  @doc """
+  Which arm of `experiment` this visitor is in.
+
+  With no experiment named, the first declared one — the only one there is in an app
+  running a single test.
+
+      <.pricing_table annual={AbFunnel.variant(@socket, :pricing) == "annual"} />
+  """
+  defdelegate variant(conn_or_socket, experiment \\ nil), to: Context
 
   @doc """
   Bind this browser to a person, so their events join up with whatever else that person
@@ -109,11 +141,18 @@ defmodule AbFunnel do
   defp default_person_key(%{id: id}) when not is_nil(id), do: "id:" <> to_string(id)
   defp default_person_key(_), do: nil
 
+  @doc "Every running experiment, measured. See `AbFunnel.Services.Report.run/1`."
+  defdelegate report(opts \\ []), to: AbFunnel.Services.Report, as: :run
+
   def repo do
     Application.fetch_env!(:ab_funnel, :repo)
   end
 
-  def variants_module do
-    Application.fetch_env!(:ab_funnel, :variants)
-  end
+  @doc """
+  The module declaring the experiments.
+
+  Kept under its old name for apps that call it; `AbFunnel.Experiments.module/0` is the
+  same thing and reads better next to the rest of that module.
+  """
+  defdelegate variants_module(), to: AbFunnel.Experiments, as: :module
 end

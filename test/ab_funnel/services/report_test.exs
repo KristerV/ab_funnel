@@ -1,262 +1,326 @@
 defmodule AbFunnel.Services.ReportTest do
   @moduledoc """
-  The funnel math, and specifically what happens when one human shows up as several
-  browsers — which is the normal case the moment a funnel spans a magic-link login.
+  The funnel math.
 
-  Counts are people. A person who runs the same flow on a phone and then again on a
-  laptop must read as one person who reached each step, not as two.
+  Three things go wrong in an A/B funnel, and every test here is one of them:
+
+    * **Who is in it.** Everyone holding a cookie is not the funnel — that is how a step
+      ends up with more people than the step above it. Only people who fired the entry
+      event count, and only what they did after firing it.
+    * **What order the steps go in.** Declared beats inferred, and a step nobody reached
+      has to render as `0` rather than vanish, because the drop-off is the whole point.
+    * **Who counts as one person.** One human on a phone and a laptop is two browsers, and
+      counting them twice at the top and once at the bottom makes every rate meaningless.
   """
-  use ExUnit.Case, async: true
+  use AbFunnel.DataCase, async: true
 
-  alias AbFunnel.Services.Report
+  @features %{"deck" => "features"}
+  @emails %{"deck" => "solving_emails"}
+  @control %{"flow" => "control"}
+  @treatment %{"flow" => "treatment"}
 
-  @steps ~w(landing generate_submitted generated signup_requested registered generated_as_user)
+  @deck_steps ~w(deck_started slide_f_intro slide_cta deck_completed lead_submitted)
 
-  # Explicit timestamps rather than insertion order: step order is derived from when
-  # each person reached each step, so the test has to control that directly.
-  defp event(visitor_id, event, minute, opts \\ []) do
+  defp event(visitor_id, name, at) do
     %AbFunnel.Resources.Event{
       visitor_id: visitor_id,
-      event: event,
-      variant: Keyword.get(opts, :variant, "control"),
-      metadata: %{},
-      inserted_at: DateTime.add(~U[2026-08-01 12:00:00.000000Z], minute, :minute)
+      event: name,
+      assignments: %{"flow" => "control"},
+      inserted_at: at,
+      updated_at: at
     }
   end
 
-  defp steps_for(funnel, variant \\ "control", source \\ "direct") do
-    {^variant, sources} = List.keyfind(funnel, variant, 0)
-    {^source, steps} = List.keyfind(sources, source, 0)
-    steps
+  defp sources_of(report, experiment_key) do
+    report
+    |> experiment(experiment_key)
+    |> Map.fetch!(:funnels)
+    |> List.first()
+    |> Map.fetch!(:sources)
   end
 
-  describe "one person, one browser" do
-    test "counts each step once and orders them by when they were reached" do
-      events = @steps |> Enum.with_index() |> Enum.map(fn {e, i} -> event("v1", e, i) end)
+  describe "the entry event decides who is in the funnel" do
+    test "someone who never fired it is not counted at all" do
+      # The prod bug this was written for: three people signed in on the landing page and
+      # never opened the deck, one person ran the whole deck. The dashboard read
+      # "Deck started 1 -> Signed in 3", a 300% step conversion, on data where three of
+      # the four had not entered the funnel.
+      journey("runner", ~w(deck_started slide_f_intro slide_cta), @features)
+      record("lurker-1", "signed_in", 0, @features)
+      record("lurker-2", "signed_in", 0, @features)
+      record("lurker-3", "signed_in", 0, @features)
 
-      assert steps_for(Report.funnel(events, %{})) ==
-               Enum.map(@steps, &{&1, 1})
+      assert arm(report(), "deck", "features").exposed == 1
     end
 
-    test "generating three codes still counts as one person at that step" do
-      events = [
-        event("v1", "landing", 0),
-        event("v1", "generated", 1),
-        event("v1", "generated", 2),
-        event("v1", "generated", 3)
-      ]
+    test "no step can be larger than the entry, whatever else people did" do
+      journey("runner", ~w(deck_started slide_f_intro), @features)
+      for i <- 1..5, do: record("lurker-#{i}", "signed_in", 0, @features)
 
-      assert steps_for(Report.funnel(events, %{})) == [{"landing", 1}, {"generated", 1}]
-    end
-  end
+      counts = report() |> steps("deck", "features") |> Enum.map(&elem(&1, 1))
 
-  describe "one person, two browsers" do
-    # The phone runs the anonymous flow and asks for a magic link. Days later the laptop
-    # arrives fresh, lands, logs in and makes a code. Seven events, six steps, one human
-    # — and the laptop repeats only *part* of what the phone did, which is what makes
-    # the step positions interesting.
-    setup do
-      phone = [
-        event("phone", "landing", 0),
-        event("phone", "generate_submitted", 1),
-        event("phone", "generated", 2),
-        event("phone", "signup_requested", 3)
-      ]
-
-      laptop = [
-        event("laptop", "landing", 10),
-        event("laptop", "registered", 11),
-        event("laptop", "generated_as_user", 12)
-      ]
-
-      %{
-        events: phone ++ laptop,
-        aliases: %{"phone" => "person-a", "laptop" => "person-a"}
-      }
+      assert Enum.max(counts) == List.first(counts)
     end
 
-    test "reads as a single person completing every step", %{events: events, aliases: aliases} do
-      assert steps_for(Report.funnel(events, aliases)) == Enum.map(@steps, &{&1, 1})
+    test "events fired before entering are trimmed away" do
+      record("a", "signed_in", 0, @features)
+      record("a", "deck_started", 5, @features)
+      record("a", "slide_f_intro", 6, @features)
+
+      steps = report() |> steps("deck", "features") |> Map.new()
+
+      refute Map.has_key?(steps, "signed_in")
+      assert steps["deck_started"] == 1
     end
 
-    test "without the binding the same data double-counts the top of the funnel", %{
-      events: events
-    } do
-      steps = Map.new(steps_for(Report.funnel(events, %{})))
+    test "but a step done both before and after entering still counts" do
+      # First-touch-wins is the right rule for ordering and the wrong one for membership:
+      # they did click the CTA inside the deck, and their earlier click must not erase it.
+      record("a", "slide_cta", 0, @features)
+      record("a", "deck_started", 5, @features)
+      record("a", "slide_cta", 6, @features)
 
-      # Two browsers both landed, so step 1 reads 2 while the tail reads 1 — the shape
-      # that makes a conversion rate impossible to read.
-      assert steps["landing"] == 2
-      assert steps["registered"] == 1
+      assert report() |> steps("deck", "features") |> Map.new() |> Map.get("slide_cta") == 1
     end
 
-    test "keeps the steps in the right order despite the repeated landing", %{
-      events: events,
-      aliases: aliases
-    } do
-      # Ordering is by average position within a person's journey. Counting every
-      # occurrence, the laptop's second `landing` sits at index 4 and drags that step's
-      # average to 2.0 — behind `generate_submitted` at 1.0, which never repeated. Only
-      # by collapsing to each person's *first* arrival at a step does `landing` stay
-      # first.
-      assert steps_for(Report.funnel(events, aliases)) |> Enum.map(&elem(&1, 0)) == @steps
+    test "an experiment with no entry event counts everyone, as it always did" do
+      record("a", "landing", 0, @control)
+      record("b", "landing", 0, @control)
 
-      assert Report.step_order(Report.resolve_people(events, aliases))
-             |> Enum.sort_by(&elem(&1, 1))
-             |> Enum.map(&elem(&1, 0)) == @steps
+      assert arm(report(), "flow", "control").exposed == 2
     end
   end
 
-  describe "identify at any point" do
-    test "binds retroactively — events written before the binding still resolve" do
-      events = [
-        event("phone", "landing", 0),
-        event("phone", "generated", 1),
-        event("laptop", "registered", 2)
-      ]
+  describe "declared steps" do
+    test "keep their order however the data falls" do
+      journey("a", ~w(lead_submitted deck_started slide_f_intro), @features)
 
-      unbound = Map.new(steps_for(Report.funnel(events, %{})))
-      bound = Map.new(steps_for(Report.funnel(events, %{"phone" => "p", "laptop" => "p"})))
-
-      assert unbound["landing"] == 1 and unbound["registered"] == 1
-      assert bound["landing"] == 1 and bound["registered"] == 1
-
-      assert Report.resolve_people(events, %{"phone" => "p", "laptop" => "p"})
-             |> Enum.map(& &1.visitor_id)
-             |> Enum.uniq() == ["p"]
+      assert report() |> steps("deck", "features") |> Enum.map(&elem(&1, 0)) == @deck_steps
     end
 
-    test "leaves unidentified visitors as their own person" do
-      events = [event("anon", "landing", 0), event("phone", "landing", 0)]
+    test "render as zero when nobody reached them" do
+      # The one thing the chart exists for. Inference drops a step nobody reached, which
+      # hides the drop-off entirely.
+      journey("a", ~w(deck_started slide_f_intro), @features)
 
-      assert Report.resolve_people(events, %{"phone" => "person-a"})
-             |> Enum.map(& &1.visitor_id) == ["anon", "person-a"]
-    end
-  end
-
-  describe "source attribution" do
-    test "first touch wins when a person arrives from two places" do
-      events = [
-        event("phone", "source:google", 0),
-        event("phone", "landing", 1),
-        event("laptop", "source:twitter", 10),
-        event("laptop", "registered", 11)
-      ]
-
-      funnel = Report.funnel(events, %{"phone" => "person-a", "laptop" => "person-a"})
-
-      assert steps_for(funnel, "control", "google") == [{"landing", 1}, {"registered", 1}]
-      assert List.keyfind(funnel, "control", 0) |> elem(1) |> length() == 1
+      assert report() |> steps("deck", "features") == [
+               {"deck_started", 1},
+               {"slide_f_intro", 1},
+               {"slide_cta", 0},
+               {"deck_completed", 0},
+               {"lead_submitted", 0}
+             ]
     end
 
-    test "source events never appear as funnel steps" do
-      events = [event("v1", "source:google", 0), event("v1", "landing", 1)]
+    test "exclude events that are not part of this funnel" do
+      journey("a", ~w(deck_started slide_f_intro), @features)
+      record("a", "signed_in", 10, @features)
 
-      assert steps_for(Report.funnel(events, %{}), "control", "google") == [{"landing", 1}]
+      refute report() |> steps("deck", "features") |> Map.new() |> Map.has_key?("signed_in")
+    end
+
+    test "are resolved per variant, so two arms can be two different journeys" do
+      journey("a", ~w(deck_started slide_f_intro), @features)
+      journey("b", ~w(deck_started slide_s_intro), @emails)
+
+      assert report() |> steps("deck", "features") |> Enum.map(&elem(&1, 0)) == @deck_steps
+
+      assert report() |> steps("deck", "solving_emails") |> Enum.map(&elem(&1, 0)) ==
+               ~w(deck_started slide_s_intro slide_cta deck_completed lead_submitted)
     end
   end
 
-  describe "variants" do
-    test "each variant gets its own funnel" do
-      events = [
-        event("v1", "landing", 0, variant: "control"),
-        event("v2", "landing", 0, variant: "treatment"),
-        event("v2", "generated", 1, variant: "treatment")
-      ]
+  describe "inferred steps, for an experiment that declares none" do
+    test "are ordered by when people first reach them" do
+      journey("a", ~w(landing generated registered), @control)
 
-      funnel = Report.funnel(events, %{})
-
-      assert steps_for(funnel, "control") == [{"landing", 1}]
-      assert steps_for(funnel, "treatment") == [{"landing", 1}, {"generated", 1}]
-    end
-  end
-
-  describe "one person assigned to two variants" do
-    # Variant assignment is a cookie, so it is rolled once per browser. A person on two
-    # devices gets two independent rolls and lands in different buckets about half the
-    # time — the most damaging thing that can happen to an A/B comparison, because it
-    # splits real journeys across the two arms being compared.
-    setup do
-      %{
-        events: [
-          event("phone", "landing", 0, variant: "control"),
-          event("phone", "generated", 1, variant: "control"),
-          event("laptop", "registered", 2, variant: "treatment"),
-          event("laptop", "generated_as_user", 3, variant: "treatment")
-        ],
-        aliases: %{"phone" => "person-a", "laptop" => "person-a"}
-      }
-    end
-
-    test "the whole journey lands in the variant they were assigned first", %{
-      events: events,
-      aliases: aliases
-    } do
-      funnel = Report.funnel(events, aliases)
-
-      assert Enum.map(funnel, &elem(&1, 0)) == ["control"]
-
-      assert steps_for(funnel, "control") == [
+      assert report() |> steps("flow", "control") == [
                {"landing", 1},
                {"generated", 1},
+               {"registered", 1}
+             ]
+    end
+
+    test "collapse repeats, so a second visit does not drag a step rightward" do
+      # Counting every occurrence, the second `landing` sits late in the list and drags
+      # that step's average behind `generated`, reordering the chart.
+      record("a", "landing", 0, @control)
+      record("a", "generated", 1, @control)
+      record("a", "landing", 2, @control)
+      record("a", "registered", 3, @control)
+
+      assert report() |> steps("flow", "control") == [
+               {"landing", 1},
+               {"generated", 1},
+               {"registered", 1}
+             ]
+    end
+
+    test "stay in order when steps are seconds rather than minutes apart" do
+      # Comparing `DateTime` structs with the default sorter falls back to Erlang term
+      # order, which ranks the struct's fields alphabetically — putting `microsecond`
+      # ahead of `minute` and `second`. Timestamps that differ below the minute, which is
+      # every real session, then sort essentially at random.
+      AbFunnel.TestRepo.insert!(event("a", "landing", ~U[2026-08-01 12:00:01.900000Z]))
+      AbFunnel.TestRepo.insert!(event("a", "generated", ~U[2026-08-01 12:00:09.100000Z]))
+      AbFunnel.TestRepo.insert!(event("a", "registered", ~U[2026-08-01 12:01:00.050000Z]))
+
+      assert report() |> steps("flow", "control") |> Enum.map(&elem(&1, 0)) ==
+               ~w(landing generated registered)
+    end
+  end
+
+  describe "counts are people, not events" do
+    test "generating three codes counts once at that step" do
+      record("a", "landing", 0, @control)
+      record("a", "generated", 1, @control)
+      record("a", "generated", 2, @control)
+      record("a", "generated", 3, @control)
+
+      assert report() |> steps("flow", "control") == [{"landing", 1}, {"generated", 1}]
+    end
+
+    test "two browsers bound to one person read as one person" do
+      # The phone runs the anonymous flow and asks for a magic link. Days later the laptop
+      # arrives fresh, lands, logs in and makes a code. One human, one journey.
+      journey("phone", ~w(landing generate_submitted signup_requested), @control)
+      journey("laptop", ~w(landing registered generated_as_user), @control, 10)
+
+      AbFunnel.identify("phone", "person-a")
+      AbFunnel.identify("laptop", "person-a")
+
+      assert report() |> steps("flow", "control") == [
+               {"landing", 1},
+               {"generate_submitted", 1},
+               {"signup_requested", 1},
                {"registered", 1},
                {"generated_as_user", 1}
              ]
     end
 
-    test "the later variant contributes no separate arm at all", %{
-      events: events,
-      aliases: aliases
-    } do
-      # Not merely "mostly control": `treatment` must not appear as a second arm holding
-      # the tail of their journey, because that is what makes the two arms look different
-      # when the only difference is which device someone finished on.
-      funnel = Report.funnel(events, aliases)
+    test "without the binding the same data double-counts the top of the funnel" do
+      journey("phone", ~w(landing generate_submitted), @control)
+      journey("laptop", ~w(landing registered), @control, 10)
 
-      refute List.keyfind(funnel, "treatment", 0)
+      steps = report() |> steps("flow", "control") |> Map.new()
+
+      assert steps["landing"] == 2
+      assert steps["registered"] == 1
     end
 
-    test "genuinely separate people keep their own variants", %{events: events} do
-      # The fix must not over-merge: with no binding these are two people, two arms.
-      funnel = Report.funnel(events, %{})
+    test "binding is retroactive over events written before it" do
+      journey("phone", ~w(landing generated), @control)
+      record("laptop", "registered", 10, @control)
 
-      assert Enum.map(funnel, &elem(&1, 0)) == ["control", "treatment"]
-    end
-  end
+      AbFunnel.identify("phone", "person-a")
+      AbFunnel.identify("laptop", "person-a")
 
-  describe "ordering by real timestamps" do
-    test "steps seconds apart stay in order" do
-      # Comparing `DateTime` structs with the default sorter falls back to Erlang term
-      # order, which ranks the struct's fields alphabetically — putting `microsecond`
-      # ahead of `minute` and `second`. Timestamps that differ below the minute, which
-      # is every real session, then sort essentially at random.
-      events = [
-        %AbFunnel.Resources.Event{
-          visitor_id: "v1",
-          event: "landing",
-          variant: "control",
-          inserted_at: ~U[2026-08-01 12:00:01.900000Z]
-        },
-        %AbFunnel.Resources.Event{
-          visitor_id: "v1",
-          event: "generated",
-          variant: "control",
-          inserted_at: ~U[2026-08-01 12:00:09.100000Z]
-        },
-        %AbFunnel.Resources.Event{
-          visitor_id: "v1",
-          event: "registered",
-          variant: "control",
-          inserted_at: ~U[2026-08-01 12:01:00.050000Z]
-        }
-      ]
-
-      assert steps_for(Report.funnel(events, %{})) |> Enum.map(&elem(&1, 0)) ==
-               ["landing", "generated", "registered"]
+      assert arm(report(), "flow", "control").exposed == 1
     end
   end
 
-  test "no events is an empty funnel, not a crash" do
-    assert Report.funnel([], %{}) == []
+  describe "variant attribution" do
+    test "a person on two devices lands in the arm they were assigned first" do
+      # Assignment is per browser, so a person on a phone and a laptop is rolled twice and
+      # lands in different arms about half the time. Left alone they show up as two
+      # half-finished journeys in two different variants — which is precisely the
+      # comparison an A/B test exists to make, quietly corrupted.
+      journey("phone", ~w(landing generated), @control)
+      journey("laptop", ~w(registered generated_as_user), @treatment, 10)
+
+      AbFunnel.identify("phone", "person-a")
+      AbFunnel.identify("laptop", "person-a")
+
+      assert arm(report(), "flow", "control").exposed == 1
+      assert arm(report(), "flow", "treatment").exposed == 0
+      assert report() |> steps("flow", "control") |> Map.new() |> Map.get("registered") == 1
+    end
+
+    test "genuinely separate people keep their own arms" do
+      journey("phone", ~w(landing generated), @control)
+      journey("laptop", ~w(registered generated_as_user), @treatment, 10)
+
+      assert arm(report(), "flow", "control").exposed == 1
+      assert arm(report(), "flow", "treatment").exposed == 1
+    end
+  end
+
+  describe "concurrent experiments" do
+    test "one person contributes to every experiment they are in, independently" do
+      both = Map.merge(@features, %{"pricing" => "annual"})
+      journey("a", ~w(deck_started slide_f_intro), both)
+
+      assert arm(report(), "deck", "features").exposed == 1
+      assert arm(report(), "pricing", "annual").exposed == 1
+    end
+
+    test "an experiment someone is not in does not see them" do
+      journey("a", ~w(deck_started slide_f_intro), @features)
+
+      assert arm(report(), "pricing", "annual").exposed == 0
+      assert arm(report(), "pricing", "monthly").exposed == 0
+    end
+  end
+
+  describe "source attribution" do
+    test "first touch wins when a person arrives from two places" do
+      record("phone", "source:google", 0, @control)
+      record("phone", "landing", 1, @control)
+      record("laptop", "source:twitter", 10, @control)
+      record("laptop", "registered", 11, @control)
+
+      AbFunnel.identify("phone", "person-a")
+      AbFunnel.identify("laptop", "person-a")
+
+      # One person, one source, so there is nothing to break the funnel out by.
+      assert sources_of(report(), "flow") == []
+      assert arm(report(), "flow", "control").exposed == 1
+    end
+
+    test "source events are never funnel steps" do
+      record("a", "source:google", 0, @control)
+      record("a", "landing", 1, @control)
+
+      assert report() |> steps("flow", "control") == [{"landing", 1}]
+    end
+
+    test "a funnel is broken out by source once there is more than one" do
+      record("a", "source:google", 0, @control)
+      journey("a", ~w(landing registered), @control, 1)
+      journey("b", ~w(landing), @control, 10)
+
+      sources = report() |> sources_of("flow") |> Enum.map(& &1.source) |> Enum.sort()
+
+      assert sources == ["direct", "google"]
+    end
+  end
+
+  describe "people who forced their own bucket" do
+    test "are excluded, so a developer clicking through does not enter the numbers" do
+      journey("real", ~w(deck_started slide_f_intro), @features)
+      journey("dev", ~w(deck_started slide_f_intro), Map.put(@features, "$qa", "1"))
+
+      assert arm(report(), "deck", "features").exposed == 1
+    end
+  end
+
+  describe "the empty case" do
+    test "no events at all is an empty report, not a crash" do
+      report = report()
+
+      assert Enum.map(report.experiments, & &1.key) == ["deck", "flow", "pricing"]
+      assert Enum.all?(report.experiments, &(&1.exposed == 0))
+      assert experiment(report, "deck").verdict.state == :no_goal
+    end
+  end
+
+  describe "the window" do
+    test "events older than it are not read" do
+      journey("a", ~w(landing generated), @control)
+
+      report = report(since: ~U[2026-08-02 00:00:00.000000Z])
+
+      assert Enum.all?(report.experiments, &(&1.exposed == 0))
+    end
   end
 end
